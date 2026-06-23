@@ -1,0 +1,478 @@
+#!/usr/bin/env zsh
+# -*- mode: sh; sh-indentation: 4; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
+# Plugin: macos
+# Script: font-patcher
+#
+# Downloads the latest Nerd Fonts FontPatcher release, installs fontforge
+# if missing, patches the given font files with complete glyph coverage
+# (including nf-cod-copilot and nf-oct-copilot), and copies the result
+# into ~/Library/Fonts.
+#
+# Usage:
+#   font-patcher [options] <font-file> [font-file ...]
+#   font-patcher [options] <directory>
+#
+# Options:
+#   --ttf              Output as TrueType (default)
+#   --otf              Output as OpenType
+#   --mono             Patch as single-width / monospaced (default)
+#   --no-mono          Patch as double-width / proportional
+#   --out <dir>        Custom output directory (default: ~/Library/Fonts)
+#   -h, --help         Show this help
+#
+# Examples:
+#   font-patcher ~/fonts/MyFont-Regular.ttf
+#   font-patcher --otf ~/fonts/*.ttf
+#   font-patcher /path/to/nerd-fonts/src/unpatched-fonts/Meslo/S
+#   font-patcher --out ./patched src/unpatched-fonts/Meslo/S/*/*.ttf
+
+# If the function was called as a script
+if [[ "$0" != font-patcher || -n "$ZSH_SCRIPT" ]]; then
+    # Standardized $0 Handling
+    # https://z.digitalclouds.dev/community/zsh_plugin_standard#zero-handling
+    0="${ZERO:-${${0:#$ZSH_ARGZERO}:-${(%):-%N}}}"
+    0="${${(M)${0::=${(%):-%x}}:#/*}:-$PWD/$0}"
+    fpath+=( "$0:h" )
+    if builtin autoload -Uz -- colors; then
+        colors
+    fi
+fi
+
+# Ensure consistent behavior and set recommended options
+builtin emulate -L zsh
+builtin setopt extended_glob warn_create_global typeset_silent no_short_loops rc_quotes no_prompt_subst no_auto_pushd err_exit
+
+#################
+### Constants ###
+#################
+
+typeset -r -a CORE_REQUIREMENTS=( curl mkdir mktemp unzip )
+typeset -r -a FONT_EXTENSIONS=( ttf otf )
+typeset -r DEFAULT_FONTS_DIR="${HOME}/Library/Fonts"
+typeset -r NERD_FONTS_REPO="ryanoasis/nerd-fonts"
+typeset -r GITHUB_API="https://api.github.com/repos/${NERD_FONTS_REPO}/releases/latest"
+
+####################
+### Core Helpers ###
+####################
+
+function .print-error() {
+
+    builtin emulate -L zsh
+
+    local date caller
+    local -a message
+
+    message=( "$@" )
+    date="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # The command '.print-error'' was called as a standalone script rather than as a function
+    if (( ! ${#funcstack[@]} )); then
+        caller=${"$(command ps -o args= -p $PPID | command sed 's/^[[:space:]]*//')"/zsh[[:space:]]/}
+    # The file witch command '.print-error' was sourced
+    elif [[ ${funcstack[1]} == */* ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-error'' was called as a non-interactive function rather than as standalone script
+    elif [[ ${funcstack[1]} != ${ZSH_SCRIPT:-$ZSH_ARGZERO} ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-error'' was called as an interactive function rather than as standalone script
+    elif [[ -n ${ZLAST_COMMANDS[1]} ]]; then
+         caller="${ZLAST_COMMANDS[1]}"
+    fi
+
+    # We trim the $caller value, leaving only the file basename
+    caller="${${caller:=$ZSH_ARGZERO}:t}"
+
+    >&2 echo "$date ${caller:+(${fg[red]}${caller}${fg[default]})} [${fg[red]}error${fg[default]}]: ${message[@]}"
+}
+
+function .print-warn() {
+    builtin emulate -L zsh
+
+    local date caller
+    local -a message
+
+    message=( "$@" )
+    date="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # The command '.print-warn'' was called as a standalone script rather than as a function
+    if (( ! ${#funcstack[@]} )); then
+        caller=${"$(command ps -o args= -p $PPID | command sed 's/^[[:space:]]*//')"/zsh[[:space:]]/}
+    # The file witch command '.print-warn' was sourced
+    elif [[ ${funcstack[1]} == */* ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-warn'' was called as a non-interactive function rather than as standalone script
+    elif [[ ${funcstack[1]} != ${ZSH_SCRIPT:-$ZSH_ARGZERO} ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-warn'' was called as an interactive function rather than as standalone script
+    elif [[ -n ${ZLAST_COMMANDS[1]} ]]; then
+         caller="${ZLAST_COMMANDS[1]}"
+    fi
+
+    # We trim the $caller value, leaving only the file basename
+    caller="${${caller:=$ZSH_ARGZERO}:t}"
+
+    >&2 echo "$date ${caller:+(${fg[yellow]}${caller}${fg[default]})} [${fg[yellow]}warning${fg[default]}]: ${message[@]}"
+}
+
+function .print-info() {
+    builtin emulate -L zsh
+
+    local date caller
+    local -a message
+
+    message=( "$@" )
+    date="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # The command '.print-info'' was called as a standalone script rather than as a function
+    if (( ! ${#funcstack[@]} )); then
+        caller=${"$(command ps -o args= -p $PPID | command sed 's/^[[:space:]]*//')"/zsh[[:space:]]/}
+    # The file witch command '.print-info' was sourced
+    elif [[ ${funcstack[1]} == */* ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-info'' was called as a non-interactive function rather than as standalone script
+    elif [[ ${funcstack[1]} != ${ZSH_SCRIPT:-$ZSH_ARGZERO} ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-info'' was called as an interactive function rather than as standalone script
+    elif [[ -n ${ZLAST_COMMANDS[1]} ]]; then
+         caller="${ZLAST_COMMANDS[1]}"
+    fi
+
+    # We trim the $caller value, leaving only the file basename
+    caller="${${caller:=$ZSH_ARGZERO}:t}"
+
+    echo -e "$date ${caller:+(${fg[green]}${caller}${fg[default]})} [${fg[green]}info${fg[default]}]: ${message[@]}"
+}
+
+function .print-success() {
+    builtin emulate -L zsh
+
+    local date caller
+    local -a message
+
+    message=( "$@" )
+    date="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    # The command '.print-success'' was called as a standalone script rather than as a function
+    if (( ! ${#funcstack[@]} )); then
+        caller=${"$(command ps -o args= -p $PPID | command sed 's/^[[:space:]]*//')"/zsh[[:space:]]/}
+    # The file witch command '.print-success' was sourced
+    elif [[ ${funcstack[1]} == */* ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-success'' was called as a non-interactive function rather than as standalone script
+    elif [[ ${funcstack[1]} != ${ZSH_SCRIPT:-$ZSH_ARGZERO} ]]; then
+        caller="${funcfiletrace[1]}"
+    # The command '.print-success'' was called as an interactive function rather than as standalone script
+    elif [[ -n ${ZLAST_COMMANDS[1]} ]]; then
+         caller="${ZLAST_COMMANDS[1]}"
+    fi
+
+    # We trim the $caller value, leaving only the file basename
+    caller="${${caller:=$ZSH_ARGZERO}:t}"
+
+    echo -e "$date ${caller:+(${fg[green]}${caller}${fg[default]})} [${fg[green]}success${fg[default]}]: ${message[@]}"
+}
+
+
+function .die() {
+    builtin emulate -L zsh
+
+    .print-error "$*"
+    exit 1
+}
+
+function .usage() {
+    builtin print -r -- \
+"Usage: font-patcher [options] <font-file|directory> [...]
+
+Patch font files with Nerd Fonts glyphs (complete set) and install them.
+
+Arguments:
+  <font-file>       One or more .ttf/.otf font files to patch
+  <directory>       Directory to scan recursively for .ttf/.otf files
+
+Options:
+  --ttf             Output as TrueType (default)
+  --otf             Output as OpenType
+  --mono            Patch as single-width / monospaced (default)
+  --no-mono         Patch as double-width / proportional
+  --out <dir>       Output directory (default: ~/Library/Fonts)
+  -h, --help        Show this help
+
+Examples:
+  font-patcher ~/fonts/MyFont-Regular.ttf
+  font-patcher --otf ~/fonts/*.ttf
+  font-patcher /path/to/nerd-fonts/src/unpatched-fonts/Meslo/S
+  font-patcher --out ./patched --no-mono src/fonts/"
+    exit 0
+}
+
+function .check_core_requirements() {
+    builtin emulate -L zsh
+
+    local tool
+
+    .print-info "Checking core requirements..."
+    for tool in "${CORE_REQUIREMENTS[@]}"; do
+        if command -v -- "$tool" >/dev/null 2>&1; then
+            .print-success "$tool... Found"
+        else
+            .die "Not found. Please install '$tool' to fix it."
+        fi
+    done
+}
+
+function .ensure_brew() {
+    builtin emulate -L zsh
+
+    if command -v -- brew >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Try common Homebrew locations
+    local -a brew_paths=( /opt/homebrew/bin/brew /usr/local/bin/brew )
+    local p
+    for p in "${brew_paths[@]}"; do
+        if [[ -x "$p" ]]; then
+            eval "$("$p" shellenv)"
+            return 0
+        fi
+    done
+
+    .die "Homebrew not found. Install it from https://brew.sh"
+}
+
+function .ensure_fontforge() {
+    builtin emulate -L zsh
+
+    if command -v -- fontforge >/dev/null 2>&1; then
+        .print-success "fontforge... Found"
+        return 0
+    fi
+
+    .print-info "fontforge not found — installing via Homebrew..."
+    .ensure_brew
+
+    if ! command brew install fontforge; then
+        .die "Unable to install fontforge via Homebrew"
+    fi
+
+    # Re-check after install
+    if ! command -v -- fontforge >/dev/null 2>&1; then
+        eval "$(brew shellenv)"
+        if ! command -v -- fontforge >/dev/null 2>&1; then
+            .die "fontforge still not found after install. Check your PATH."
+        fi
+    fi
+
+    .print-success "fontforge... Installed"
+}
+
+function .ensure_dir() {
+    builtin emulate -L zsh
+
+    local dir="$1"
+    if [[ ! -d "$dir" ]]; then
+        .print-info "Creating directory: $dir"
+        if ! command mkdir -p -- "$dir" >/dev/null 2>&1; then
+            .die "Unable to create directory: $dir"
+        fi
+    fi
+}
+
+function .cleanup() {
+    builtin emulate -L zsh
+
+    local target="$1"
+    if [[ -n "$target" && -d "$target" ]]; then
+        command rm -rf -- "$target"
+    fi
+}
+
+function .get_latest_release_tag() {
+    builtin emulate -L zsh
+
+    local tag
+    tag=$(command curl -fsSL "$GITHUB_API" 2>/dev/null \
+        | command awk -F'"' '/"tag_name"/ {print $4; exit}')
+
+    if [[ -z "$tag" ]]; then
+        .die "Unable to determine latest Nerd Fonts release tag"
+    fi
+
+    builtin print -r -- "$tag"
+}
+
+function .download_font_patcher() {
+    builtin emulate -L zsh
+
+    local tag="$1" dest_dir="$2"
+    local url="https://github.com/${NERD_FONTS_REPO}/releases/download/${tag}/FontPatcher.zip"
+    local zip_file="${dest_dir}/FontPatcher.zip"
+
+    .print-info "Downloading FontPatcher ${tag}..."
+    if ! command curl -fsSL "$url" -o "$zip_file"; then
+        .die "Unable to download FontPatcher from: $url"
+    fi
+
+    .print-info "Extracting FontPatcher..."
+    if ! command unzip -o -q "$zip_file" -d "$dest_dir"; then
+        .die "Unable to extract FontPatcher"
+    fi
+
+    command rm -f -- "$zip_file"
+}
+
+# Resolve input arguments (files and directories) into a list of font files.
+function .resolve_font_files() {
+    builtin emulate -L zsh
+
+    local -a inputs=( "$@" )
+    local -a resolved=()
+    local item ext
+
+    for item in "${inputs[@]}"; do
+        if [[ -f "$item" ]]; then
+            ext="${item:e:l}"
+            if [[ "${FONT_EXTENSIONS[(Ie)$ext]}" -gt 0 ]]; then
+                resolved+=( "${item:A}" )
+            else
+                .print-warn "Skipping non-font file: $item"
+            fi
+        elif [[ -d "$item" ]]; then
+            # Recursively collect font files from directory
+            local -a found=()
+            for ext in "${FONT_EXTENSIONS[@]}"; do
+                found+=( "${item}"/**/*."${ext}"(N) )
+            done
+            if [[ ${#found[@]} -eq 0 ]]; then
+                .print-warn "No font files found in directory: $item"
+            else
+                resolved+=( "${found[@]}" )
+            fi
+        else
+            .die "Path does not exist: $item"
+        fi
+    done
+
+    if [[ ${#resolved[@]} -eq 0 ]]; then
+        .die "No font files resolved from the given arguments"
+    fi
+
+    builtin print -r -l -- "${resolved[@]}"
+}
+
+############
+### Main ###
+############
+
+typeset temp_dir patcher_dir font font_ext mono_flag output_dir release_tag
+typeset -a source_fonts patched_fonts positional_args
+
+# Defaults
+font_ext="ttf"
+mono_flag="-s"
+output_dir="$DEFAULT_FONTS_DIR"
+positional_args=()
+
+# Parse arguments
+while (( $# )); do
+    case "$1" in
+        --ttf)      font_ext="ttf" ;;
+        --otf)      font_ext="otf" ;;
+        --mono)     mono_flag="-s" ;;
+        --no-mono)  mono_flag="" ;;
+        --out)
+            shift
+            output_dir="${1:-.}"
+            ;;
+        -h|--help)
+            .usage
+            ;;
+        --)
+            shift
+            positional_args+=( "$@" )
+            break
+            ;;
+        -*)
+            .die "Unknown option: $1. Use -h for help."
+            ;;
+        *)
+            positional_args+=( "$1" )
+            ;;
+    esac
+    shift
+done
+
+if [[ ${#positional_args[@]} -eq 0 ]]; then
+    .print-error "No font files or directories specified"
+    .usage
+fi
+
+# Step 1: Resolve font files from arguments
+source_fonts=( "${(@f)$(.resolve_font_files "${positional_args[@]}")}" )
+
+.print-info "Patching ${#source_fonts[@]} font(s) → format=${font_ext}, mono=${mono_flag:+yes}${mono_flag:-no}, output=${output_dir}"
+
+# Step 2: Check core tools and ensure fontforge
+.check_core_requirements
+.ensure_fontforge
+
+# Step 3: Create temp workspace
+if ! temp_dir=$(command mktemp -d); then
+    .die "Unable to create temporary directory"
+fi
+trap '.cleanup "$temp_dir"' EXIT
+
+patcher_dir="${temp_dir}/patcher"
+command mkdir -p -- "$patcher_dir" "${patcher_dir}/out"
+
+# Step 4: Get latest FontPatcher (with up-to-date glyphs including copilot)
+release_tag=$(.get_latest_release_tag)
+.print-info "Latest Nerd Fonts release: ${release_tag}"
+.download_font_patcher "$release_tag" "$patcher_dir"
+
+# Step 5: Patch each font
+.print-info "Patching fonts with complete glyph coverage..."
+for font in "${source_fonts[@]}"; do
+    .print-info "Patching: ${font:t}..."
+    if ! command fontforge -script "${patcher_dir}/font-patcher" "$font" \
+        ${mono_flag:+$mono_flag} -c -ext "$font_ext" -out "${patcher_dir}/out" 2>/dev/null; then
+        .die "Unable to patch font: ${font:t}"
+    fi
+    .print-success "Patched: ${font:t}"
+done
+
+# Step 6: Install patched fonts
+.ensure_dir "$output_dir"
+
+patched_fonts=("${patcher_dir}"/out/*.${font_ext}(N))
+if [[ ${#patched_fonts[@]} -le 0 ]]; then
+    .die "No patched fonts found in output directory"
+fi
+
+.print-info "Copying ${#patched_fonts[@]} patched font(s) to: $output_dir"
+if ! command cp -f -- "${patched_fonts[@]}" "$output_dir/"; then
+    .die "Unable to copy patched fonts"
+fi
+
+# Step 7: Refresh font cache if available and installing to system location
+if [[ "$output_dir" == "$DEFAULT_FONTS_DIR" ]] && (( ${+commands[fc-cache]} )); then
+    .print-info "Refreshing font cache..."
+    command fc-cache -f "$output_dir" >/dev/null 2>&1
+fi
+
+# Step 8: Cleanup
+.print-info "Cleaning up..."
+.cleanup "$temp_dir"
+trap - EXIT
+
+.print-success "Done! ${#patched_fonts[@]} font(s) patched with ${release_tag} and saved to ${output_dir}"
+.print-info "Installed fonts:"
+for font in "${patched_fonts[@]}"; do
+    .print-info "  • ${font:t}"
+done
+
+exit
+
+# vim:ft=zsh:sw=4:sts=4:ts=8:et
